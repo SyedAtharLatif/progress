@@ -51,7 +51,7 @@ const auth = getAuth(app);
 const db = getFirestore(app);
 
 // Get App ID - Vercel will not have __app_id defined
-const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id'; // eslint-disable-line no-undef
 
 // --- Firestore Path Helpers ---
 const getPrivateUserCollection = (userId) =>
