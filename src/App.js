@@ -113,6 +113,15 @@ export default function App() {
   // --- Live Clock State ---
   const [currentTime, setCurrentTime] = useState(new Date());
 
+  // --- Formatted Time Memo (FIXED: Moved to top level) ---
+  const currentFormattedTime = useMemo(() => {
+    return currentTime.toLocaleTimeString([], {
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+    });
+  }, [currentTime]);
+
   // --- Authentication Effect ---
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
@@ -634,9 +643,6 @@ export default function App() {
 
   // --- Logged In View ---
   const { upcoming, active, todayCompleted } = categorizedTasks;
-  const currentFormattedTime = useMemo(() => {
-     return currentTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-  }, [currentTime]);
 
   return (
     <div className="min-h-screen bg-gray-900 text-gray-100 p-4 md:p-8 font-inter">
