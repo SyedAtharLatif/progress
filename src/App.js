@@ -271,7 +271,6 @@ export default function App() {
   const filteredStats = useMemo(() => {
     if (allUserStats.length === 0) return [];
 
-    // FIX: Removed unused 'now' variable
     const startOfToday = new Date();
     startOfToday.setHours(0, 0, 0, 0);
     const startOfWeek = new Date(startOfToday);
@@ -343,6 +342,10 @@ export default function App() {
          }
          return stat;
       }
+      
+      // Determine the start date for pushup calculation
+      const lastResetDate = stat.lastReset?.toDate ? stat.lastReset.toDate() : null;
+      const pushupStartDate = (filterType === 'today' && lastResetDate && lastResetDate > startOfToday) ? lastResetDate : startOfToday;
 
       // For the current user, calculate stats from the filtered tasks
       const tasksCompleted = tasksForPeriod.length;
@@ -350,10 +353,10 @@ export default function App() {
         (sum, task) => sum + (task.estimatedHours || 0),
         0
       );
-      // We assume pushups are linked to the 'lastReset' or 'all'
-      const pushupsCompleted = (filterType === 'all' || !stat.lastReset)
+      
+      const pushupsCompleted = (filterType === 'all' || !lastResetDate)
         ? stat.pushupsCompleted
-        : (new Date(stat.lastReset.toDate()) < startOfToday ? 0 : stat.pushupsCompleted);
+        : (lastResetDate < pushupStartDate ? 0 : stat.pushupsCompleted);
 
 
       return {
