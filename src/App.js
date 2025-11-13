@@ -271,7 +271,7 @@ export default function App() {
   const filteredStats = useMemo(() => {
     if (allUserStats.length === 0) return [];
 
-    const now = new Date();
+    // FIX: Removed unused 'now' variable
     const startOfToday = new Date();
     startOfToday.setHours(0, 0, 0, 0);
     const startOfWeek = new Date(startOfToday);
