@@ -267,7 +267,7 @@ export default function App() {
     return { upcoming, active, completed, todayCompleted };
   }, [tasks, user, currentTime]);
 
-  // --- Chart Data Filtering ---
+  // --- Chart Data Filtering (FIXED: Safer logic to prevent crashes) ---
   const filteredStats = useMemo(() => {
     if (allUserStats.length === 0) return [];
 
@@ -278,95 +278,85 @@ export default function App() {
     const startOfMonth = new Date(startOfToday);
     startOfMonth.setDate(1);
 
+    // This is the new, safer logic
     return allUserStats.map((stat) => {
-      // Find the user's tasks to filter by date
-      const userTasks =
-        stat.userId === user?.uid
-          ? tasks
-          : []; // Note: We can only filter the current user's tasks accurately by date
+      // Provide defaults for all potentially missing values to prevent crashes
+      const safeStat = {
+        userId: stat.userId || '',
+        displayName: stat.displayName || 'Unnamed User',
+        tasksCompleted: stat.tasksCompleted || 0,
+        totalHours: stat.totalHours || 0,
+        pushupsCompleted: stat.pushupsCompleted || 0,
+        lastReset: stat.lastReset ? stat.lastReset.toDate() : null,
+      };
 
-      // Helper to filter tasks for the current period
-      const getTasksForPeriod = (periodStart) => {
-        return userTasks.filter((task) => {
-          const completedTime = task.completedAt?.toDate
-            ? task.completedAt.toDate()
-            : null;
-          return (
-            task.completed && completedTime && completedTime >= periodStart
-          );
+      // We can only filter the current user's tasks accurately by date
+      if (safeStat.userId !== user?.uid) {
+        // For other users, just return their total stats regardless of filter
+        // The charts will be most accurate for "All Time"
+        return safeStat;
+      }
+
+      // --- Filtering logic for the CURRENT user ---
+      const getTasksForPeriod = (startDate) => {
+        // If 'All Time', filter from the last reset date
+        const periodStart = (filterType === 'all' && safeStat.lastReset) ? safeStat.lastReset : startDate;
+        
+        return tasks.filter((task) => {
+          const completedTime = task.completedAt?.toDate ? task.completedAt.toDate() : null;
+          if (!task.completed || !completedTime) return false;
+          
+          if (filterType === 'all') {
+            // If 'all', use lastReset date (or beginning of time)
+            return safeStat.lastReset ? completedTime >= safeStat.lastReset : true;
+          }
+          // Otherwise, use the period start date (today, week, month)
+          return completedTime >= periodStart;
         });
       };
 
       let tasksForPeriod = [];
+      let periodStartDate = startOfToday;
+
       if (filterType === 'today') {
-        tasksForPeriod = getTasksForPeriod(startOfToday);
+        periodStartDate = startOfToday;
       } else if (filterType === 'week') {
-        tasksForPeriod = getTasksForPeriod(startOfWeek);
+        periodStartDate = startOfWeek;
       } else if (filterType === 'month') {
-        tasksForPeriod = getTasksForPeriod(startOfMonth);
-      } else {
-        // 'all' - use the total stats, or filter by lastReset
-        const lastReset = stat.lastReset?.toDate ? stat.lastReset.toDate() : null;
-        if (lastReset) {
-          tasksForPeriod = userTasks.filter((task) => {
-            const completedTime = task.completedAt?.toDate
-              ? task.completedAt.toDate()
-              : null;
-            return (
-              task.completed && completedTime && completedTime >= lastReset
-            );
-          });
-        } else {
-          // Fallback for older data without lastReset
-           tasksForPeriod = userTasks.filter(task => task.completed);
-        }
+        periodStartDate = startOfMonth;
+      } else { // 'all'
+        periodStartDate = safeStat.lastReset || new Date(0); // Use last reset or beginning of time
       }
 
-      // For other users, we can't filter by date, so we show totals
-      // This is a limitation of our data model, but is fine for this app
-      if (stat.userId !== user?.uid) {
-         if (filterType === 'all') {
-           return stat; // Show total stats for 'all'
-         }
-         // For other filters, we can't know their date-filtered stats,
-         // so we'll return 0 or just their name.
-         // A better model would store stats by date, but that's much more complex.
-         // For now, we'll just show totals for 'all' and hide them otherwise.
-         if (filterType !== 'all') {
-            return {
-             ...stat,
-             tasksCompleted: 0,
-             totalHours: 0,
-             pushupsCompleted: 0,
-           };
-         }
-         return stat;
-      }
+      tasksForPeriod = getTasksForPeriod(periodStartDate);
       
-      // Determine the start date for pushup calculation
-      const lastResetDate = stat.lastReset?.toDate ? stat.lastReset.toDate() : null;
-      const pushupStartDate = (filterType === 'today' && lastResetDate && lastResetDate > startOfToday) ? lastResetDate : startOfToday;
-
-      // For the current user, calculate stats from the filtered tasks
       const tasksCompleted = tasksForPeriod.length;
       const totalHours = tasksForPeriod.reduce(
         (sum, task) => sum + (task.estimatedHours || 0),
         0
       );
       
-      const pushupsCompleted = (filterType === 'all' || !lastResetDate)
-        ? stat.pushupsCompleted
-        : (lastResetDate < pushupStartDate ? 0 : stat.pushupsCompleted);
-
-
+      // Pushups are a total count, reset on 'Reset Data'.
+      // The `pushupsCompleted` in stats *is* the total since last reset.
+      // We don't filter pushups by date, just show the total since last reset.
+      let pushupsCompleted = safeStat.pushupsCompleted;
+      
+      // If filtering by date, and lastReset is *after* the period start, pushups should be 0
+      if (safeStat.lastReset && safeStat.lastReset > periodStartDate) {
+         if (filterType !== 'all') {
+           pushupsCompleted = 0;
+         }
+      }
+      
       return {
-        ...stat,
+        ...safeStat,
         tasksCompleted,
         totalHours,
-        pushupsCompleted: (filterType === 'today') ? pushupsCompleted : stat.pushupsCompleted, // Only show today's pushups for 'today'
+        pushupsCompleted: pushupsCompleted, 
       };
-    }).filter(stat => stat.tasksCompleted > 0 || stat.pushupsCompleted > 0 || filterType === 'all'); // Only show users with activity
+    });
   }, [allUserStats, filterType, user, tasks]);
+
 
   // --- Auth Functions ---
   const signIn = async () => {
@@ -399,9 +389,6 @@ export default function App() {
     setError(null);
 
     // CRITICAL: Convert local datetime-local string to a UTC Timestamp
-    // The input 'newTaskStartTime' is like "2025-11-13T17:30"
-    // We create a Date object from this string, which JS interprets in the *local* timezone.
-    // When we create a Timestamp from this Date, Firestore stores it correctly.
     try {
       const localDate = new Date(newTaskStartTime);
       if (isNaN(localDate.getTime())) {
@@ -439,6 +426,11 @@ export default function App() {
 
     const intervalId = setInterval(() => {
       setRunningTimers((prevTimers) => {
+        // Check if timer still exists before updating
+        if (!prevTimers[taskId]) {
+          clearInterval(intervalId);
+          return prevTimers;
+        }
         const newElapsed = (prevTimers[taskId]?.elapsedSeconds || initialElapsed) + 1;
         return {
           ...prevTimers,
@@ -484,8 +476,24 @@ export default function App() {
   const handleCompleteTask = async (taskId) => {
     if (!user) return;
 
-    // Stop timer if it's running
-    stopTaskTimer(taskId);
+    const timer = runningTimers[taskId];
+    let finalElapsedSeconds;
+
+    if (timer) {
+      // If timer is running, stop it
+      clearInterval(timer.intervalId);
+      finalElapsedSeconds = timer.elapsedSeconds;
+      // Remove from running timers state
+      setRunningTimers((prev) => {
+        const { [taskId]: _, ...rest } = prev;
+        return rest;
+      });
+    } else {
+      // If timer was not running, get elapsed seconds from task
+      const task = tasks.find((t) => t.id === taskId);
+      finalElapsedSeconds = task?.elapsedSeconds || 0;
+    }
+
 
     const task = tasks.find((t) => t.id === taskId);
     if (!task) return;
@@ -508,7 +516,8 @@ export default function App() {
       batch.update(taskRef, {
         completed: true,
         completedAt: Timestamp.now(),
-        elapsedSeconds: runningTimers[taskId]?.elapsedSeconds || task.elapsedSeconds,
+        elapsedSeconds: finalElapsedSeconds,
+        timerStarted: false,
       });
 
       // 2. Update public stats
@@ -520,11 +529,6 @@ export default function App() {
 
       await batch.commit();
 
-      // Clear from running timers state if it was there
-      setRunningTimers((prev) => {
-        const { [taskId]: _, ...rest } = prev;
-        return rest;
-      });
     } catch (err) {
       console.error('Error completing task:', err);
       setError(`Failed to complete task: ${err.message}`);
@@ -535,7 +539,7 @@ export default function App() {
   const handleAddPenalty = async () => {
     if (!user) return;
     const newPushupCount = dailyPushups + 5;
-    setDailyPushups(newPushupCount);
+    setDailyPushups(newPushupCount); // Note: This local state isn't really used, but fine to keep
 
     // Store in public stats
     const statsRef = doc(db, getPublicStatsDocPath(user.uid));
@@ -762,7 +766,11 @@ export default function App() {
                 <input
                   type="checkbox"
                   id="addPenalty"
-                  onChange={handleAddPenalty}
+                  // We need to clear the checkbox after click, so it's controlled by a state or just reset
+                  onChange={(e) => {
+                     handleAddPenalty();
+                     e.target.checked = false; // Reset checkbox
+                  }}
                   className="h-6 w-6 bg-gray-700 border-gray-600 rounded text-blue-500 focus:ring-blue-500"
                 />
                 <label htmlFor="addPenalty" className="text-lg text-gray-300">
@@ -770,7 +778,7 @@ export default function App() {
                 </label>
               </div>
               <p className="text-sm text-gray-400">
-                Check this box to add a 5 pushup penalty to your daily count.
+                Check this box to add a 5 pushup penalty to your total count.
               </p>
             </div>
 
@@ -798,7 +806,7 @@ export default function App() {
                       <p className="text-gray-300 mb-6">
                         This will delete ALL tasks and reset ALL stats for
                         EVERY user. This cannot be undone.
-                      </p>
+                      </D>
                       <div className="flex justify-end space-x-4">
                         <button
                           onClick={() => setShowResetConfirm(false)}
@@ -1009,7 +1017,9 @@ function TaskSection({
 
 // --- Sub-Component: ChartComponent ---
 function ChartComponent({ title, data, dataKey, fill }) {
-  if (data.length === 0) {
+  const chartData = data.filter(d => (d[dataKey] || 0) > 0);
+
+  if (chartData.length === 0) {
     return (
        <div>
         <h4 className="text-lg font-semibold text-white mb-2">{title}</h4>
@@ -1023,7 +1033,7 @@ function ChartComponent({ title, data, dataKey, fill }) {
       <div style={{ width: '100%', height: 300 }}>
         <ResponsiveContainer>
           <BarChart
-            data={data}
+            data={chartData}
             margin={{
               top: 5,
               right: 20,
