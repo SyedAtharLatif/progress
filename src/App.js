@@ -20,7 +20,6 @@ import {
   onSnapshot,
   writeBatch,
   Timestamp,
-  deleteDoc,
   serverTimestamp,
 } from 'firebase/firestore';
 import {
@@ -32,9 +31,6 @@ import {
   Tooltip,
   Legend,
   ResponsiveContainer,
-  PieChart,
-  Pie,
-  Cell,
 } from 'recharts';
 
 // --- Firebase Configuration ---
@@ -260,7 +256,7 @@ export default function App() {
     if (!user || !newTaskTitle || !newTaskTime || !newTaskHours) return;
 
     // Combine date and time
-    const [datePart, timePart] = new Date().toISOString().split('T');
+    const [datePart] = new Date().toISOString().split('T');
     const fullISOString = `${datePart}T${newTaskTime}:00`;
     const startTime = new Date(fullISOString);
     
@@ -545,7 +541,6 @@ export default function App() {
 
 
   // --- Helper Functions ---
-  const formatTime = (time) => time ? new Date(time).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }) : 'N/A';
   const formatTimer = (seconds) => {
     const h = Math.floor(seconds / 3600).toString().padStart(2, '0');
     const m = Math.floor((seconds % 3600) / 60).toString().padStart(2, '0');
