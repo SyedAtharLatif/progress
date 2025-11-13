@@ -2,9 +2,9 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { initializeApp } from 'firebase/app';
 import {
   getAuth,
-  signInWithPopup,
-  GoogleAuthProvider,
   onAuthStateChanged,
+  GoogleAuthProvider,
+  signInWithPopup,
   signOut,
 } from 'firebase/auth';
 import {
@@ -32,8 +32,9 @@ import {
   ResponsiveContainer,
 } from 'recharts';
 
-// --- Deployment Config ---
-// These keys are loaded from Vercel's Environment Variables
+// --- Firebase Initialization ---
+// IMPORTANT: DO NOT hardcode your config here.
+// These keys are automatically provided by Vercel from Environment Variables
 const firebaseConfig = {
   apiKey: process.env.REACT_APP_API_KEY,
   authDomain: process.env.REACT_APP_AUTH_DOMAIN,
@@ -42,7 +43,6 @@ const firebaseConfig = {
   messagingSenderId: process.env.REACT_APP_MESSAGING_SENDER_ID,
   appId: process.env.REACT_APP_APP_ID,
 };
-// --- End of Deployment Config ---
 
 // Initialize Firebase
 const app = initializeApp(firebaseConfig);
@@ -53,1050 +53,978 @@ const db = getFirestore(app);
 const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id'; // eslint-disable-line no-undef
 
 // --- Firestore Path Helpers ---
-const getPrivateUserCollection = (userId) =>
-  `artifacts/${appId}/users/${userId}`;
-const getPublicDataCollection = () => `artifacts/${appId}/public/data`;
+// Gets the path for a user's private task collection
+const getTasksCollectionPath = (userId) =>
+  `/artifacts/${appId}/users/${userId}/tasks`;
 
-// --- Utility Functions ---
-const getStartOfDate = (date) => {
-  const newDate = new Date(date);
-  newDate.setHours(0, 0, 0, 0);
-  return newDate;
-};
+// Gets the path for a user's public statistics document
+const getPublicStatsDocPath = (userId) =>
+  `/artifacts/${appId}/public/data/userStats/${userId}`;
 
-const formatStopwatch = (seconds) => {
-  const h = Math.floor(seconds / 3600)
-    .toString()
-    .padStart(2, '0');
-  const m = Math.floor((seconds % 3600) / 60)
-    .toString()
-    .padStart(2, '0');
-  const s = Math.floor(seconds % 60)
-    .toString()
-    .padStart(2, '0');
-  return `${h}:${m}:${s}`;
+// Gets the path for the collection of all public stats (for charts)
+const getAllPublicStatsCollectionPath = () =>
+  `/artifacts/${appId}/public/data/userStats`;
+
+// --- Audio Context for Bell ---
+// Create a persistent audio context
+let audioContext;
+try {
+  audioContext = new (window.AudioContext || window.webkitAudioContext)();
+} catch (e) {
+  console.error('Web Audio API is not supported in this browser');
+}
+
+// Function to play a "beep" sound
+const playBell = () => {
+  if (!audioContext) return;
+  const oscillator = audioContext.createOscillator();
+  const gainNode = audioContext.createGain();
+  oscillator.connect(gainNode);
+  gainNode.connect(audioContext.destination);
+  oscillator.type = 'sine';
+  oscillator.frequency.setValueAtTime(880, audioContext.currentTime); // A nice "beep"
+  gainNode.gain.setValueAtTime(0.5, audioContext.currentTime);
+  gainNode.gain.exponentialRampToValueAtTime(
+    0.001,
+    audioContext.currentTime + 0.5
+  );
+  oscillator.start(audioContext.currentTime);
+  oscillator.stop(audioContext.currentTime + 0.5);
 };
 
 // --- Main App Component ---
-function App() {
+export default function App() {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
+  const [error, setError] = useState(null);
 
-  // New Task State
-  const [taskTitle, setTaskTitle] = useState('');
-  const [startTime, setStartTime] = useState('');
-  const [estimatedHours, setEstimatedHours] = useState(1);
-
-  // Data State
+  // --- App State ---
   const [tasks, setTasks] = useState([]);
+  const [newTaskTitle, setNewTaskTitle] = useState('');
+  const [newTaskStartTime, setNewTaskStartTime] = useState('');
+  const [newTaskHours, setNewTaskHours] = useState(1);
   const [allUserStats, setAllUserStats] = useState([]);
-  const [dailyPushups, setDailyPushups] = useState(5);
-  const [pushupPenaltyChecked, setPushupPenaltyChecked] = useState(false);
-
-  // Timer State
-  const [currentTime, setCurrentTime] = useState(new Date());
-  const [activeTimers, setActiveTimers] = useState({}); // { taskId: seconds }
-
-  // Chart Filter State
   const [filterType, setFilterType] = useState('today');
+  const [dailyPushups, setDailyPushups] = useState(5);
+  const [runningTimers, setRunningTimers] = useState({}); // { taskId: { intervalId, elapsedSeconds } }
+  const [showResetConfirm, setShowResetConfirm] = useState(false);
+  const [resetError, setResetError] = useState(null);
 
-  // Confirmation Modal State
-  const [showResetModal, setShowResetModal] = useState(false);
+  // --- Live Clock State ---
+  const [currentTime, setCurrentTime] = useState(new Date());
 
   // --- Authentication Effect ---
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
       if (currentUser) {
-        // User is signed in
-        const userStatsDocRef = doc(
-          db,
-          getPublicDataCollection(),
-          'userStats',
-          currentUser.uid
-        );
-        const userStatsDoc = await getDoc(userStatsDocRef);
+        // Check if this is a new user
+        const userStatsRef = doc(db, getPublicStatsDocPath(currentUser.uid));
+        const userStatsSnap = await getDoc(userStatsRef);
 
-        if (!userStatsDoc.exists()) {
-          // Create new public stats doc for this user
-          await setDoc(userStatsDocRef, {
+        if (!userStatsSnap.exists()) {
+          // New user: create their public stat document
+          await setDoc(userStatsRef, {
+            userId: currentUser.uid,
             displayName: currentUser.displayName,
             email: currentUser.email,
             tasksCompleted: 0,
             totalHours: 0,
-            tasks: [], // Store task timestamps for filtering
-            pushups: [], // Store pushup timestamps
+            pushupsCompleted: 0,
+            lastReset: new Date(),
           });
         }
         setUser(currentUser);
       } else {
-        // User is signed out
         setUser(null);
       }
       setLoading(false);
     });
-
-    // Cleanup subscription on unmount
     return () => unsubscribe();
   }, []);
 
-  // --- Live Clock Effect ---
+  // --- Live Clock & Bell Effect ---
   useEffect(() => {
-    const timerId = setInterval(() => {
+    // Start a timer to update the current time every second
+    const clockInterval = setInterval(() => {
       setCurrentTime(new Date());
     }, 1000);
-    return () => clearInterval(timerId);
+
+    return () => clearInterval(clockInterval);
   }, []);
 
-  // --- Stopwatch Timer Effect ---
-  useEffect(() => {
-    const timerIds = {};
-
-    Object.keys(activeTimers).forEach((taskId) => {
-      if (activeTimers[taskId].isRunning) {
-        timerIds[taskId] = setInterval(() => {
-          setActiveTimers((prev) => ({
-            ...prev,
-            [taskId]: {
-              ...prev[taskId],
-              seconds: prev[taskId].seconds + 1,
-            },
-          }));
-        }, 1000);
-      }
-    });
-
-    return () => {
-      Object.values(timerIds).forEach(clearInterval);
-    };
-  }, [activeTimers]);
-
-  // --- Sound Effect for Active Tasks ---
-  useEffect(() => {
-    const playSound = () => {
-      try {
-        const audioContext = new (window.AudioContext ||
-          window.webkitAudioContext)();
-        const oscillator = audioContext.createOscillator();
-        const gainNode = audioContext.createGain();
-
-        oscillator.connect(gainNode);
-        gainNode.connect(audioContext.destination);
-
-        oscillator.type = 'sine';
-        oscillator.frequency.setValueAtTime(440, audioContext.currentTime); // A4
-        gainNode.gain.setValueAtTime(0.5, audioContext.currentTime);
-
-        oscillator.start();
-        oscillator.stop(audioContext.currentTime + 0.2); // Play for 0.2 seconds
-      } catch (e) {
-        console.error('Audio playback failed:', e);
-      }
-    };
-
-    tasks.forEach((task) => {
-      if (
-        !task.completed &&
-        !task.notified &&
-        new Date(task.startTime.toDate()) <= currentTime
-      ) {
-        playSound();
-        // Mark as notified to prevent repeated beeps
-        const taskDocRef = doc(
-          db,
-          getPrivateUserCollection(user.uid),
-          'tasks',
-          task.id
-        );
-        updateDoc(taskDocRef, { notified: true });
-      }
-    });
-  }, [currentTime, tasks, user]);
-
-  // --- Data Fetching Effects (Tasks, Stats, Pushups) ---
+  // --- Firestore Listeners Effect ---
   useEffect(() => {
     if (!user) {
       setTasks([]);
+      setAllUserStats([]);
       return;
     }
 
-    // Fetch user's private tasks
-    const tasksCollectionRef = collection(
-      db,
-      getPrivateUserCollection(user.uid),
-      'tasks'
+    // Listener for user's private tasks
+    const tasksQuery = query(
+      collection(db, getTasksCollectionPath(user.uid))
     );
-    const qTasks = query(tasksCollectionRef);
-
     const unsubscribeTasks = onSnapshot(
-      qTasks,
+      tasksQuery,
       (snapshot) => {
-        const tasksData = snapshot.docs.map((d) => ({ id: d.id, ...d.data() }));
-        setTasks(tasksData);
-      },
-      (err) => {
-        console.error('Error fetching tasks:', err);
-        setError('Failed to fetch tasks.');
-      }
-    );
-
-    // Fetch user's pushup count for today
-    const fetchPushups = async () => {
-      const todayStr = getStartOfDate(new Date()).toISOString().split('T')[0];
-      const pushupDocRef = doc(
-        db,
-        getPrivateUserCollection(user.uid),
-        'pushups',
-        todayStr
-      );
-      const pushupDoc = await getDoc(pushupDocRef);
-
-      if (pushupDoc.exists()) {
-        setDailyPushups(pushupDoc.data().count);
-      } else {
-        // Create new pushup doc for today
-        await setDoc(pushupDocRef, { count: 5 });
-        setDailyPushups(5);
-      }
-    };
-
-    fetchPushups();
-
-    // Cleanup subscriptions
-    return () => unsubscribeTasks();
-  }, [user]);
-
-  // Fetch all public user stats for charts
-  useEffect(() => {
-    const statsCollectionRef = collection(
-      db,
-      getPublicDataCollection(),
-      'userStats'
-    );
-    const qStats = query(statsCollectionRef);
-
-    const unsubscribeStats = onSnapshot(
-      qStats,
-      (snapshot) => {
-        const statsData = snapshot.docs.map((d) => ({
+        const userTasks = snapshot.docs.map((d) => ({
           id: d.id,
           ...d.data(),
         }));
-        setAllUserStats(statsData);
+        setTasks(userTasks);
       },
       (err) => {
-        console.error('Error fetching all user stats:', err);
-        setError('Failed to fetch user stats for charts.');
+        console.error('Error fetching tasks:', err);
+        setError('Failed to load tasks.');
       }
     );
 
-    return () => unsubscribeStats();
-  }, []);
+    // Listener for all public stats (for charts)
+    const statsQuery = query(collection(db, getAllPublicStatsCollectionPath()));
+    const unsubscribeStats = onSnapshot(
+      statsQuery,
+      (snapshot) => {
+        const stats = snapshot.docs.map((d) => d.data());
+        setAllUserStats(stats);
+      },
+      (err) => {
+        console.error('Error fetching user stats:', err);
+        setError('Failed to load user stats.');
+      }
+    );
 
-  // --- Event Handlers ---
+    return () => {
+      unsubscribeTasks();
+      unsubscribeStats();
+    };
+  }, [user]);
 
-  const handleSignIn = async () => {
-    setLoading(true);
-    setError('');
-    const provider = new GoogleAuthProvider();
+  // --- Timer Management Effect ---
+  useEffect(() => {
+    // This effect cleans up intervals when a task is completed or deleted
+    return () => {
+      Object.values(runningTimers).forEach((timer) => {
+        clearInterval(timer.intervalId);
+      });
+    };
+  }, [runningTimers]);
+
+  // --- Task Categorization & Bell Logic ---
+  const categorizedTasks = useMemo(() => {
+    if (!user)
+      return { upcoming: [], active: [], completed: [], todayCompleted: [] };
+
+    const now = currentTime.getTime();
+    const startOfToday = new Date(currentTime);
+    startOfToday.setHours(0, 0, 0, 0);
+
+    const upcoming = [];
+    const active = [];
+    const completed = [];
+    const todayCompleted = [];
+
+    tasks.forEach((task) => {
+      // Ensure startTime is a Date object
+      const startTime = task.startTime?.toDate ? task.startTime.toDate() : null;
+      if (!startTime) return;
+
+      if (task.completed) {
+        completed.push(task);
+        const completedTime = task.completedAt?.toDate
+          ? task.completedAt.toDate()
+          : null;
+        if (completedTime && completedTime >= startOfToday) {
+          todayCompleted.push(task);
+        }
+      } else if (startTime.getTime() <= now) {
+        // Active
+        if (!task.notified) {
+          playBell();
+          // Mark as notified in Firestore so it only rings once
+          const taskRef = doc(
+            db,
+            getTasksCollectionPath(user.uid),
+            task.id
+          );
+          updateDoc(taskRef, { notified: true });
+        }
+        active.push(task);
+      } else {
+        // Upcoming
+        upcoming.push(task);
+      }
+    });
+
+    return { upcoming, active, completed, todayCompleted };
+  }, [tasks, user, currentTime]);
+
+  // --- Chart Data Filtering ---
+  const filteredStats = useMemo(() => {
+    if (allUserStats.length === 0) return [];
+
+    const now = new Date();
+    const startOfToday = new Date();
+    startOfToday.setHours(0, 0, 0, 0);
+    const startOfWeek = new Date(startOfToday);
+    startOfWeek.setDate(startOfWeek.getDate() - startOfToday.getDay());
+    const startOfMonth = new Date(startOfToday);
+    startOfMonth.setDate(1);
+
+    return allUserStats.map((stat) => {
+      // Find the user's tasks to filter by date
+      const userTasks =
+        stat.userId === user?.uid
+          ? tasks
+          : []; // Note: We can only filter the current user's tasks accurately by date
+
+      // Helper to filter tasks for the current period
+      const getTasksForPeriod = (periodStart) => {
+        return userTasks.filter((task) => {
+          const completedTime = task.completedAt?.toDate
+            ? task.completedAt.toDate()
+            : null;
+          return (
+            task.completed && completedTime && completedTime >= periodStart
+          );
+        });
+      };
+
+      let tasksForPeriod = [];
+      if (filterType === 'today') {
+        tasksForPeriod = getTasksForPeriod(startOfToday);
+      } else if (filterType === 'week') {
+        tasksForPeriod = getTasksForPeriod(startOfWeek);
+      } else if (filterType === 'month') {
+        tasksForPeriod = getTasksForPeriod(startOfMonth);
+      } else {
+        // 'all' - use the total stats, or filter by lastReset
+        const lastReset = stat.lastReset?.toDate ? stat.lastReset.toDate() : null;
+        if (lastReset) {
+          tasksForPeriod = userTasks.filter((task) => {
+            const completedTime = task.completedAt?.toDate
+              ? task.completedAt.toDate()
+              : null;
+            return (
+              task.completed && completedTime && completedTime >= lastReset
+            );
+          });
+        } else {
+          // Fallback for older data without lastReset
+           tasksForPeriod = userTasks.filter(task => task.completed);
+        }
+      }
+
+      // For other users, we can't filter by date, so we show totals
+      // This is a limitation of our data model, but is fine for this app
+      if (stat.userId !== user?.uid) {
+         if (filterType === 'all') {
+           return stat; // Show total stats for 'all'
+         }
+         // For other filters, we can't know their date-filtered stats,
+         // so we'll return 0 or just their name.
+         // A better model would store stats by date, but that's much more complex.
+         // For now, we'll just show totals for 'all' and hide them otherwise.
+         if (filterType !== 'all') {
+            return {
+             ...stat,
+             tasksCompleted: 0,
+             totalHours: 0,
+             pushupsCompleted: 0,
+           };
+         }
+         return stat;
+      }
+
+      // For the current user, calculate stats from the filtered tasks
+      const tasksCompleted = tasksForPeriod.length;
+      const totalHours = tasksForPeriod.reduce(
+        (sum, task) => sum + (task.estimatedHours || 0),
+        0
+      );
+      // We assume pushups are linked to the 'lastReset' or 'all'
+      const pushupsCompleted = (filterType === 'all' || !stat.lastReset)
+        ? stat.pushupsCompleted
+        : (new Date(stat.lastReset.toDate()) < startOfToday ? 0 : stat.pushupsCompleted);
+
+
+      return {
+        ...stat,
+        tasksCompleted,
+        totalHours,
+        pushupsCompleted: (filterType === 'today') ? pushupsCompleted : stat.pushupsCompleted, // Only show today's pushups for 'today'
+      };
+    }).filter(stat => stat.tasksCompleted > 0 || stat.pushupsCompleted > 0 || filterType === 'all'); // Only show users with activity
+  }, [allUserStats, filterType, user, tasks]);
+
+  // --- Auth Functions ---
+  const signIn = async () => {
+    setError(null);
     try {
+      const provider = new GoogleAuthProvider();
       await signInWithPopup(auth, provider);
-    } catch (error) {
-      console.error('Sign-in error:', error);
-      setError(`Failed to sign in with Google. Error: ${error.message}`);
-      setLoading(false);
+    } catch (err) {
+      console.error('Sign-in error:', err);
+      setError(`Failed to sign in. Error: ${err.message}`);
     }
   };
 
-  const handleSignOut = async () => {
-    setLoading(true);
-    setError('');
-    try {
-      await signOut(auth);
-    } catch (error) {
-      console.error('Sign-out error:', error);
-      setError('Failed to sign out.');
-      setLoading(false);
-    }
+  const logOut = async () => {
+    // Stop all running timers before logging out
+    Object.values(runningTimers).forEach((timer) => {
+      clearInterval(timer.intervalId);
+    });
+    setRunningTimers({});
+    await signOut(auth);
   };
 
+  // --- Task Functions ---
   const handleAddTask = async (e) => {
     e.preventDefault();
-    if (!user || !taskTitle || !startTime || !estimatedHours) {
-      setError('Please fill in all fields.');
+    if (!user || !newTaskTitle || !newTaskStartTime || !newTaskHours) {
+      setError('Please fill out all fields.');
       return;
     }
-    setError('');
+    setError(null);
 
+    // CRITICAL: Convert local datetime-local string to a UTC Timestamp
+    // The input 'newTaskStartTime' is like "2025-11-13T17:30"
+    // We create a Date object from this string, which JS interprets in the *local* timezone.
+    // When we create a Timestamp from this Date, Firestore stores it correctly.
     try {
-      // --- FIX: Create date object from local datetime-local input ---
-      // This creates the date object correctly based on the user's local timezone
-      const localStartDate = new Date(startTime);
-      if (isNaN(localStartDate.getTime())) {
-        setError('Invalid date format.');
+      const localDate = new Date(newTaskStartTime);
+      if (isNaN(localDate.getTime())) {
+        setError('Invalid date/time format.');
         return;
       }
-      // --- End of Fix ---
+      
+      const startTimeAsTimestamp = Timestamp.fromDate(localDate);
 
-      const tasksCollectionRef = collection(
-        db,
-        getPrivateUserCollection(user.uid),
-        'tasks'
-      );
-      await addDoc(tasksCollectionRef, {
-        title: taskTitle,
-        startTime: Timestamp.fromDate(localStartDate), // Convert local date to Firestore Timestamp
-        estimatedHours: parseFloat(estimatedHours),
+      await addDoc(collection(db, getTasksCollectionPath(user.uid)), {
+        title: newTaskTitle,
+        startTime: startTimeAsTimestamp,
+        estimatedHours: parseFloat(newTaskHours),
         completed: false,
         notified: false,
-        timeElapsed: 0, // Store elapsed time in seconds
+        elapsedSeconds: 0,
+        timerStarted: false,
       });
 
       // Reset form
-      setTaskTitle('');
-      setStartTime('');
-      setEstimatedHours(1);
-    } catch (error) {
-      console.error('Error adding task:', error);
-      setError(`Failed to add task. Error: ${error.message}`);
+      setNewTaskTitle('');
+      setNewTaskStartTime('');
+      setNewTaskHours(1);
+    } catch (err) {
+      console.error('Error adding task:', err);
+      setError(`Failed to add task: ${err.message}`);
     }
   };
 
-  const handleToggleTaskTimer = (taskId, isRunning) => {
-    setActiveTimers((prev) => {
-      const currentTimer = prev[taskId] || { seconds: 0, isRunning: false };
-      return {
-        ...prev,
-        [taskId]: {
-          ...currentTimer,
-          isRunning: !isRunning,
-        },
-      };
+  const startTaskTimer = (taskId) => {
+    if (runningTimers[taskId]) return; // Already running
+
+    const task = tasks.find((t) => t.id === taskId);
+    const initialElapsed = task.elapsedSeconds || 0;
+
+    const intervalId = setInterval(() => {
+      setRunningTimers((prevTimers) => {
+        const newElapsed = (prevTimers[taskId]?.elapsedSeconds || initialElapsed) + 1;
+        return {
+          ...prevTimers,
+          [taskId]: {
+            ...prevTimers[taskId],
+            elapsedSeconds: newElapsed,
+          },
+        };
+      });
+    }, 1000);
+
+    setRunningTimers((prev) => ({
+      ...prev,
+      [taskId]: { intervalId, elapsedSeconds: initialElapsed },
+    }));
+
+    // Mark task as started in Firestore
+    const taskRef = doc(db, getTasksCollectionPath(user.uid), taskId);
+    updateDoc(taskRef, { timerStarted: true });
+  };
+
+  const stopTaskTimer = (taskId) => {
+    const timer = runningTimers[taskId];
+    if (!timer) return;
+
+    clearInterval(timer.intervalId);
+    const finalElapsedSeconds = timer.elapsedSeconds;
+
+    // Remove from running timers state
+    setRunningTimers((prev) => {
+      const { [taskId]: _, ...rest } = prev;
+      return rest;
+    });
+
+    // Update Firestore with final elapsed time
+    const taskRef = doc(db, getTasksCollectionPath(user.uid), taskId);
+    updateDoc(taskRef, {
+      elapsedSeconds: finalElapsedSeconds,
+      timerStarted: false, // Mark as stopped
     });
   };
 
-  const handleMarkAsComplete = async (task) => {
+  const handleCompleteTask = async (taskId) => {
     if (!user) return;
-    setError('');
+
+    // Stop timer if it's running
+    stopTaskTimer(taskId);
+
+    const task = tasks.find((t) => t.id === taskId);
+    if (!task) return;
+
+    const taskRef = doc(db, getTasksCollectionPath(user.uid), taskId);
+    const statsRef = doc(db, getPublicStatsDocPath(user.uid));
 
     try {
-      const taskDocRef = doc(
-        db,
-        getPrivateUserCollection(user.uid),
-        'tasks',
-        task.id
-      );
-      const publicStatsDocRef = doc(
-        db,
-        getPublicDataCollection(),
-        'userStats',
-        user.uid
-      );
-
-      const publicStatsDoc = await getDoc(publicStatsDocRef);
-      if (!publicStatsDoc.exists()) {
-        throw new Error('Public stats document does not exist.');
+      const statsDoc = await getDoc(statsRef);
+      if (!statsDoc.exists()) {
+        setError('User stats document not found.');
+        return;
       }
+      const currentStats = statsDoc.data();
 
-      const statsData = publicStatsDoc.data();
+      // Update both documents in a batch
+      const batch = writeBatch(db);
 
-      // Get elapsed time from state, or use 0 if timer was never started
-      const elapsedSeconds = activeTimers[task.id]
-        ? activeTimers[task.id].seconds
-        : task.timeElapsed || 0;
-      const elapsedHours = elapsedSeconds / 3600;
-
-      // Update private task doc
-      await updateDoc(taskDocRef, {
+      // 1. Update private task
+      batch.update(taskRef, {
         completed: true,
-        timeElapsed: elapsedSeconds,
+        completedAt: Timestamp.now(),
+        elapsedSeconds: runningTimers[taskId]?.elapsedSeconds || task.elapsedSeconds,
       });
 
-      // Update public stats doc
-      const newTasksCompleted = (statsData.tasksCompleted || 0) + 1;
-      const newTotalHours = (statsData.totalHours || 0) + elapsedHours;
-      const newTasksArray = [
-        ...(statsData.tasks || []),
-        {
-          id: task.id,
-          completedAt: Timestamp.now(),
-          hours: elapsedHours,
-        },
-      ];
-
-      await updateDoc(publicStatsDocRef, {
-        tasksCompleted: newTasksCompleted,
-        totalHours: newTotalHours,
-        tasks: newTasksArray,
+      // 2. Update public stats
+      batch.update(statsRef, {
+        tasksCompleted: (currentStats.tasksCompleted || 0) + 1,
+        totalHours:
+          (currentStats.totalHours || 0) + (task.estimatedHours || 0),
       });
 
-      // Clear the timer from state
-      setActiveTimers((prev) => {
-        const newState = { ...prev };
-        delete newState[task.id];
-        return newState;
+      await batch.commit();
+
+      // Clear from running timers state if it was there
+      setRunningTimers((prev) => {
+        const { [taskId]: _, ...rest } = prev;
+        return rest;
       });
-    } catch (error) {
-      console.error('Error completing task:', error);
-      setError(`Failed to complete task. Error: ${error.message}`);
+    } catch (err) {
+      console.error('Error completing task:', err);
+      setError(`Failed to complete task: ${err.message}`);
     }
   };
 
+  // --- Pushup Functions ---
   const handleAddPenalty = async () => {
-    if (!user || pushupPenaltyChecked) return; // Prevent double-clicking
-    setError('');
-    setPushupPenaltyChecked(true); // Disable checkbox immediately
+    if (!user) return;
+    const newPushupCount = dailyPushups + 5;
+    setDailyPushups(newPushupCount);
 
+    // Store in public stats
+    const statsRef = doc(db, getPublicStatsDocPath(user.uid));
     try {
-      const newPushupCount = dailyPushups + 5;
-      const todayStr = getStartOfDate(new Date()).toISOString().split('T')[0];
-      const pushupDocRef = doc(
-        db,
-        getPrivateUserCollection(user.uid),
-        'pushups',
-        todayStr
-      );
-      const publicStatsDocRef = doc(
-        db,
-        getPublicDataCollection(),
-        'userStats',
-        user.uid
-      );
-
-      // Update private pushup count for today
-      await setDoc(pushupDocRef, { count: newPushupCount }, { merge: true });
-      setDailyPushups(newPushupCount);
-
-      // Update public stats with a new pushup entry
-      const publicStatsDoc = await getDoc(publicStatsDocRef);
-      if (!publicStatsDoc.exists()) {
-        throw new Error('Public stats document does not exist.');
-      }
-      const statsData = publicStatsDoc.data();
-      const newPushupsArray = [
-        ...(statsData.pushups || []),
-        {
-          addedAt: Timestamp.now(),
-          count: 5,
-        },
-      ];
-
-      await updateDoc(publicStatsDocRef, {
-        pushups: newPushupsArray,
+      const statsDoc = await getDoc(statsRef);
+      const currentPushups = statsDoc.data()?.pushupsCompleted || 0;
+      await updateDoc(statsRef, {
+        pushupsCompleted: currentPushups + 5,
       });
-    } catch (error) {
-      console.error('Error adding penalty:', error);
-      setError(`Failed to add penalty. Error: ${error.message}`);
-    } finally {
-      // Re-enable checkbox after a short delay
-      setTimeout(() => setPushupPenaltyChecked(false), 1000);
+    } catch (err) {
+      console.error('Error adding penalty:', err);
+      setError(`Failed to add penalty: ${err.message}`);
     }
   };
 
+  // --- Admin Functions ---
   const handleResetData = async () => {
-    if (!user || user.email !== 'atharlatif200@gmail.com') {
-      setError('You are not authorized to perform this action.');
-      return;
-    }
-    setError('');
-    setLoading(true);
+    if (!user) return;
+    setResetError(null);
 
     try {
       const batch = writeBatch(db);
 
-      // 1. Delete all private tasks
-      const tasksCollectionRef = collection(
-        db,
-        getPrivateUserCollection(user.uid),
-        'tasks'
-      );
-      const tasksSnapshot = await getDocs(tasksCollectionRef);
-      tasksSnapshot.docs.forEach((d) => {
-        batch.delete(d.ref);
+      // 1. Delete all tasks in the user's private collection
+      const tasksQuery = query(collection(db, getTasksCollectionPath(user.uid)));
+      const tasksSnapshot = await getDocs(tasksQuery);
+      tasksSnapshot.forEach((doc) => {
+        batch.delete(doc.ref);
       });
 
-      // 2. Delete all private pushup docs
-      const pushupsCollectionRef = collection(
-        db,
-        getPrivateUserCollection(user.uid),
-        'pushups'
-      );
-      const pushupsSnapshot = await getDocs(pushupsCollectionRef);
-      pushupsSnapshot.docs.forEach((d) => {
-        batch.delete(d.ref);
-      });
-
-      // 3. Reset public stats doc
-      const publicStatsDocRef = doc(
-        db,
-        getPublicDataCollection(),
-        'userStats',
-        user.uid
-      );
-      batch.update(publicStatsDocRef, {
+      // 2. Reset the user's public stats document
+      const statsRef = doc(db, getPublicStatsDocPath(user.uid));
+      batch.update(statsRef, {
         tasksCompleted: 0,
         totalHours: 0,
-        tasks: [],
-        pushups: [],
+        pushupsCompleted: 0,
+        lastReset: Timestamp.now(),
       });
 
       // Commit the batch
       await batch.commit();
 
       // Reset local state
-      setTasks([]);
       setDailyPushups(5);
-      setActiveTimers({});
-      setShowResetModal(false);
-    } catch (error) {
-      console.error('Error resetting data:', error);
-      setError(`Failed to reset data. Error: ${error.message}`);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  // --- Memos for Filtered Data ---
-
-  // Categorize tasks
-  const categorizedTasks = useMemo(() => {
-    const today = getStartOfDate(currentTime);
-    const upcoming = [];
-    const active = [];
-    const completed = [];
-
-    tasks.forEach((task) => {
-      const taskStartTime = new Date(task.startTime.toDate());
-
-      if (task.completed) {
-        completed.push(task);
-      } else if (taskStartTime > currentTime) {
-        upcoming.push(task);
+      setRunningTimers({});
+      setShowResetConfirm(false);
+    } catch (err) {
+      console.error('Error resetting data:', err);
+      // Check for the specific permissions error
+      if (err.code === 'permission-denied' || err.code === 'failed-precondition') {
+        setResetError('Failed to reset data. Error: Missing or insufficient permissions. Please update your Firestore security rules.');
       } else {
-        active.push(task);
+        setResetError(`Failed to reset data: ${err.message}`);
       }
-    });
-
-    const todayFilter = (task) =>
-      getStartOfDate(task.startTime.toDate()).getTime() === today.getTime();
-
-    return {
-      upcomingToday: upcoming.filter(todayFilter),
-      activeToday: active.filter(todayFilter),
-      completedToday: completed.filter(todayFilter),
-    };
-  }, [tasks, currentTime]);
-
-  // Filter chart data
-  const filteredChartData = useMemo(() => {
-    // --- FIX: Add this check ---
-    // If there is no user, return empty data to prevent crash
-    if (!user) {
-      return { taskData: [], hourData: [], pushupData: [] };
     }
-    // --- End of Fix ---
-
-    const now = new Date();
-    const today = getStartOfDate(now);
-    const startOfWeek = getStartOfDate(
-      new Date(now.setDate(now.getDate() - now.getDay()))
-    );
-    const startOfMonth = getStartOfDate(
-      new Date(now.getFullYear(), now.getMonth(), 1)
-    );
-
-    let filterStartDate;
-    switch (filterType) {
-      case 'week':
-        filterStartDate = startOfWeek;
-        break;
-      case 'month':
-        filterStartDate = startOfMonth;
-        break;
-      case 'today':
-        filterStartDate = today;
-        break;
-      default: // 'all'
-        filterStartDate = new Date(0); // The beginning of time
-    }
-
-    const taskData = [];
-    const hourData = [];
-    const pushupData = [];
-
-    allUserStats.forEach((statUser) => {
-      const filteredTasks = statUser.tasks.filter(
-        (task) => task.completedAt.toDate() >= filterStartDate
-      );
-      const filteredPushups = statUser.pushups.filter(
-        (p) => p.addedAt.toDate() >= filterStartDate
-      );
-
-      const tasksCompleted = filteredTasks.length;
-      const totalHours = filteredTasks.reduce((sum, t) => sum + t.hours, 0);
-      const totalPushups = filteredPushups.reduce((sum, p) => sum + p.count, 0);
-
-      taskData.push({
-        name: statUser.displayName.split(' ')[0],
-        Tasks: tasksCompleted,
-      });
-      hourData.push({
-        name: statUser.displayName.split(' ')[0],
-        Hours: parseFloat(totalHours.toFixed(2)),
-      });
-      pushupData.push({
-        name: statUser.displayName.split(' ')[0],
-        Pushups: totalPushups,
-      });
-    });
-
-    return { taskData, hourData, pushupData };
-  }, [allUserStats, filterType, user]);
-
-  // --- Render Methods ---
-
-  const renderTask = (task) => {
-    const isRunning = activeTimers[task.id]
-      ? activeTimers[task.id].isRunning
-      : false;
-    // --- FIX: Show timer even if not running, default to 0 ---
-    const elapsedSeconds = activeTimers[task.id]
-      ? activeTimers[task.id].seconds
-      : task.timeElapsed || 0;
-    // --- End of Fix ---
-
-    return (
-      <li
-        key={task.id}
-        className="mb-3 p-4 bg-gray-700 rounded-lg shadow-sm"
-      >
-        <div className="flex justify-between items-center">
-          <div>
-            <span className="font-semibold text-lg">{task.title}</span>
-            <p className="text-sm text-gray-400">
-              Starts: {new Date(task.startTime.toDate()).toLocaleTimeString()} |
-              Est: {task.estimatedHours}h
-            </p>
-          </div>
-          <div className="text-right">
-            <button
-              onClick={() => handleToggleTaskTimer(task.id, isRunning)}
-              className={`px-4 py-2 rounded-md text-white font-semibold ${
-                isRunning
-                  ? 'bg-yellow-500 hover:bg-yellow-600'
-                  : 'bg-blue-500 hover:bg-blue-600'
-              } mr-2`}
-            >
-              {isRunning ? 'Pause' : 'Start Task'}
-            </button>
-            <button
-              onClick={() => handleMarkAsComplete(task)}
-              className="px-4 py-2 rounded-md bg-green-500 text-white font-semibold hover:bg-green-600"
-            >
-              Complete
-            </button>
-          </div>
-        </div>
-        <div className="mt-2 text-center">
-          <span className="text-xl font-mono text-gray-200">
-            Time Elapsed: {formatStopwatch(elapsedSeconds)}
-          </span>
-        </div>
-      </li>
-    );
   };
 
-  const renderChart = (data, dataKey, color) => (
-    <div className="mb-8">
-      <h3 className="text-2xl font-semibold mb-4 text-white">{dataKey}</h3>
-      <ResponsiveContainer width="100%" height={300}>
-        <BarChart
-          data={data}
-          margin={{
-            top: 5,
-            right: 30,
-            left: 20,
-            bottom: 5,
-          }}
-        >
-          <CartesianGrid strokeDasharray="3 3" stroke="#4a5568" />
-          <XAxis dataKey="name" stroke="#cbd5e0" />
-          <YAxis stroke="#cbd5e0" />
-          <Tooltip
-            contentStyle={{ backgroundColor: '#2d3748', border: 'none' }}
-            labelStyle={{ color: '#e2e8f0' }}
-          />
-          <Legend />
-          <Bar dataKey={dataKey} fill={color} />
-        </BarChart>
-      </ResponsiveContainer>
-    </div>
-  );
+  // --- Helper Functions ---
+  // Formats seconds into HH:MM:SS
+  const formatStopwatch = (totalSeconds) => {
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = totalSeconds % 60;
+    return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(
+      2,
+      '0'
+    )}:${String(seconds).padStart(2, '0')}`;
+  };
 
-  const renderFilterButtons = () => (
-    <div className="flex space-x-2 mb-6">
-      <button
-        onClick={() => setFilterType('today')}
-        className={`px-4 py-2 rounded-md font-semibold ${
-          filterType === 'today'
-            ? 'bg-blue-500 text-white'
-            : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
-        }`}
-      >
-        Today
-      </button>
-      <button
-        onClick={() => setFilterType('week')}
-        className={`px-4 py-2 rounded-md font-semibold ${
-          filterType === 'week'
-            ? 'bg-blue-500 text-white'
-            : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
-        }`}
-      >
-        This Week
-      </button>
-      <button
-        onClick={() => setFilterType('month')}
-        className={`px-4 py-2 rounded-md font-semibold ${
-          filterType === 'month'
-            ? 'bg-blue-500 text-white'
-            : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
-        }`}
-      >
-        This Month
-      </button>
-      <button
-        onClick={() => setFilterType('all')}
-        className={`px-4 py-2 rounded-md font-semibold ${
-          filterType === 'all'
-            ? 'bg-blue-500 text-white'
-            : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
-        }`}
-      >
-        All Time
-      </button>
-    </div>
-  );
-
-  // --- Main Render ---
-
+  // --- Render ---
   if (loading) {
     return (
-      <div className="min-h-screen bg-gray-900 flex items-center justify-center text-white">
-        <h1 className="text-3xl">Loading...</h1>
+      <div className="flex items-center justify-center min-h-screen bg-gray-900 text-white">
+        Loading...
       </div>
     );
   }
 
+  // --- Logged Out View ---
   if (!user) {
     return (
-      <div className="min-h-screen bg-gray-900 flex flex-col items-center justify-center text-white p-4">
-        <h1 className="text-4xl font-bold mb-4">Task Progress Tracker</h1>
-        <p className="text-lg mb-8">
+      <div className="flex flex-col items-center justify-center min-h-screen bg-gray-900 p-8">
+        <h1 className="text-4xl font-bold text-white mb-6">
+          Welcome to Your Task Tracker
+        </h1>
+        <p className="text-xl text-gray-300 mb-8">
           Sign in to track your tasks and compare progress with friends.
         </p>
         <button
-          onClick={handleSignIn}
-          className="px-6 py-3 bg-blue-600 text-white font-semibold rounded-lg shadow-md hover:bg-blue-700 transition duration-300"
+          onClick={signIn}
+          className="px-6 py-3 bg-blue-600 text-white font-semibold rounded-lg shadow-lg hover:bg-blue-700 transition-colors"
         >
           Sign in with Google
         </button>
-        {error && (
-          <p className="mt-6 text-red-400 bg-red-900 bg-opacity-50 border border-red-400 p-3 rounded-md">
-            {error}
-          </p>
-        )}
+        {error && <p className="text-red-400 mt-6">{error}</p>}
       </div>
     );
   }
 
-  return (
-    <div className="min-h-screen bg-gray-900 text-gray-200 p-4 md:p-8">
-      {/* Confirmation Modal */}
-      {showResetModal && (
-        <div className="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center z-50">
-          <div className="bg-gray-800 p-6 rounded-lg shadow-xl max-w-sm w-full">
-            <h2 className="text-2xl font-bold text-white mb-4">Are you sure?</h2>
-            <p className="text-gray-300 mb-6">
-              This action is irreversible. It will delete all your tasks and
-              reset your stats to zero. Your friend's data will not be affected.
-            </p>
-            <div className="flex justify-end space-x-4">
-              <button
-                onClick={() => setShowResetModal(false)}
-                className="px-4 py-2 rounded-md bg-gray-600 text-white font-semibold hover:bg-gray-500"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={handleResetData}
-                className="px-4 py-2 rounded-md bg-red-600 text-white font-semibold hover:bg-red-700"
-              >
-                Yes, Reset All My Data
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+  // --- Logged In View ---
+  const { upcoming, active, todayCompleted } = categorizedTasks;
+  const currentFormattedTime = useMemo(() => {
+     return currentTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  }, [currentTime]);
 
-      {/* Header */}
-      <header className="flex flex-col md:flex-row justify-between md:items-center mb-8 pb-4 border-b border-gray-700">
-        <div>
-          <h1 className="text-4xl font-bold text-white">
-            Welcome, {user.displayName.split(' ')[0]}
-          </h1>
-          <p className="text-sm text-gray-400 mt-2">
-            Your User ID (for debugging): {user.uid}
-          </p>
-        </div>
-        <div className="flex flex-col md:flex-row items-start md:items-center space-y-2 md:space-y-0 md:space-x-4 mt-4 md:mt-0">
-          {/* Admin-only Reset Button */}
-          {user.email === 'atharlatif200@gmail.com' && (
-            <button
-              onClick={() => setShowResetModal(true)}
-              className="px-4 py-2 rounded-md bg-red-600 text-white font-semibold hover:bg-red-700"
-            >
-              Reset All My Data
-            </button>
-          )}
+  return (
+    <div className="min-h-screen bg-gray-900 text-gray-100 p-4 md:p-8 font-inter">
+      <div className="max-w-7xl mx-auto">
+        {/* --- Header --- */}
+        <header className="flex flex-col md:flex-row justify-between items-center mb-6 p-4 bg-gray-800 rounded-lg shadow-lg">
+          <div>
+            <h1 className="text-2xl md:text-3xl font-bold text-white">
+              Welcome, {user.displayName}
+            </h1>
+            <p className="text-sm text-gray-400">
+              Your User ID: {user.uid}
+            </p>
+          </div>
+           <div className="text-center md:text-right mt-4 md:mt-0">
+            <div className="text-2xl font-semibold text-white">{currentFormattedTime}</div>
+            <div className="text-sm text-gray-400">{currentTime.toLocaleDateString([], { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}</div>
+          </div>
           <button
-            onClick={handleSignOut}
-            className="px-4 py-2 rounded-md bg-gray-700 text-white font-semibold hover:bg-gray-600"
+            onClick={logOut}
+            className="mt-4 md:mt-0 px-5 py-2 bg-red-600 text-white font-semibold rounded-lg shadow hover:bg-red-700 transition-colors"
           >
             Sign Out
           </button>
-        </div>
-      </header>
+        </header>
 
-      {/* Error Display */}
-      {error && (
-        <div className="mb-6 p-3 rounded-md bg-red-900 bg-opacity-50 text-red-400 border border-red-400">
-          {error}
-        </div>
-      )}
+        {/* --- Error Display --- */}
+        {error && (
+          <div className="bg-red-800 border border-red-600 text-red-100 px-4 py-3 rounded-lg relative mb-6 shadow-lg">
+            <strong className="font-bold">Error: </strong>
+            <span className="block sm:inline">{error}</span>
+          </div>
+        )}
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-        {/* Left Column: Task Management */}
-        <div>
-          {/* Add Task Form */}
-          <div className="bg-gray-800 p-6 rounded-lg shadow-lg mb-8">
-            <h2 className="text-2xl font-semibold mb-4 text-white">
-              Add a New Task for Today
-            </h2>
-            <form onSubmit={handleAddTask} className="space-y-4">
-              <div>
-                <label
-                  htmlFor="taskTitle"
-                  className="block text-sm font-medium text-gray-300 mb-1"
-                >
-                  Task Title
-                </label>
-                <input
-                  type="text"
-                  id="taskTitle"
-                  value={taskTitle}
-                  onChange={(e) => setTaskTitle(e.target.value)}
-                  placeholder="e.g., Read 1 chapter"
-                  className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
-                />
-              </div>
-              <div className="grid grid-cols-2 gap-4">
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          {/* --- Left Column: Add Task & Penalties --- */}
+          <div className="lg:col-span-1 flex flex-col gap-6">
+            {/* --- Add Task Form --- */}
+            <div className="bg-gray-800 p-6 rounded-lg shadow-xl">
+              <h2 className="text-2xl font-semibold text-white mb-4">
+                Add a New Task
+              </h2>
+              <form onSubmit={handleAddTask} className="space-y-4">
+                <div>
+                  <label
+                    htmlFor="taskTitle"
+                    className="block text-sm font-medium text-gray-300 mb-1"
+                  >
+                    Task Title
+                  </label>
+                  <input
+                    type="text"
+                    id="taskTitle"
+                    value={newTaskTitle}
+                    onChange={(e) => setNewTaskTitle(e.target.value)}
+                    placeholder="e.g., Read 1 chapter"
+                    className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  />
+                </div>
                 <div>
                   <label
                     htmlFor="startTime"
                     className="block text-sm font-medium text-gray-300 mb-1"
                   >
-                    Start Time (Today)
+                    Start Time
                   </label>
                   <input
                     type="datetime-local"
                     id="startTime"
-                    value={startTime}
-                    onChange={(e) => setStartTime(e.target.value)}
-                    className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    value={newTaskStartTime}
+                    onChange={(e) => setNewTaskStartTime(e.target.value)}
+                    className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
                   />
                 </div>
                 <div>
                   <label
-                    htmlFor="estimatedHours"
+                    htmlFor="taskHours"
                     className="block text-sm font-medium text-gray-300 mb-1"
                   >
                     Estimated Hours
                   </label>
                   <input
                     type="number"
-                    id="estimatedHours"
-                    value={estimatedHours}
-                    onChange={(e) => setEstimatedHours(e.target.value)}
+                    id="taskHours"
+                    value={newTaskHours}
                     min="0.1"
                     step="0.1"
-                    className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    onChange={(e) => setNewTaskHours(e.target.value)}
+                    className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
                   />
                 </div>
-              </div>
-              <button
-                type="submit"
-                className="w-full px-4 py-2 bg-blue-600 text-white font-semibold rounded-lg shadow-md hover:bg-blue-700 transition duration-300"
-              >
-                Add Task
-              </button>
-            </form>
-          </div>
+                <button
+                  type="submit"
+                  className="w-full px-4 py-2 bg-blue-600 text-white font-semibold rounded-lg shadow-lg hover:bg-blue-700 transition-colors"
+                >
+                  Add Task
+                </button>
+              </form>
+            </div>
 
-          {/* Daily Penalty Section */}
-          <div className="bg-gray-800 p-6 rounded-lg shadow-lg mb-8">
-            <h2 className="text-2xl font-semibold mb-4 text-white">
-              Daily Penalty
-            </h2>
-            <div className="flex items-center justify-between">
-              <span className="text-lg">
-                Total Pushups for Today: <strong>{dailyPushups}</strong>
-              </span>
-              <div className="flex items-center space-x-3">
+            {/* --- Daily Penalty --- */}
+            <div className="bg-gray-800 p-6 rounded-lg shadow-xl">
+              <h2 className="text-2xl font-semibold text-white mb-4">
+                Daily Penalty
+              </h2>
+              <div className="flex items-center justify-between mb-4">
+                <span className="text-lg text-gray-300">Total Pushups:</span>
+                <span className="text-3xl font-bold text-blue-400">
+                  {allUserStats.find((s) => s.userId === user.uid)
+                    ?.pushupsCompleted || 0}
+                </span>
+              </div>
+              <div className="flex items-center space-x-4 mb-4">
                 <input
                   type="checkbox"
-                  id="penalty"
-                  checked={pushupPenaltyChecked}
+                  id="addPenalty"
                   onChange={handleAddPenalty}
-                  className="h-5 w-5 rounded text-blue-500 bg-gray-700 border-gray-600 focus:ring-blue-500"
+                  className="h-6 w-6 bg-gray-700 border-gray-600 rounded text-blue-500 focus:ring-blue-500"
                 />
-                <label htmlFor="penalty" className="text-gray-300">
+                <label htmlFor="addPenalty" className="text-lg text-gray-300">
                   Add Penalty (+5 Pushups)
                 </label>
               </div>
+              <p className="text-sm text-gray-400">
+                Check this box to add a 5 pushup penalty to your daily count.
+              </p>
             </div>
+
+            {/* --- Admin Reset (Conditional) --- */}
+            {user.email === 'atharlatif200@gmail.com' && (
+              <div className="bg-gray-800 p-6 rounded-lg shadow-xl border border-red-700">
+                <h2 className="text-2xl font-semibold text-red-400 mb-4">
+                  Admin Panel
+                </h2>
+                <button
+                  onClick={() => setShowResetConfirm(true)}
+                  className="w-full px-4 py-2 bg-red-700 text-white font-semibold rounded-lg shadow-lg hover:bg-red-800 transition-colors"
+                >
+                  Reset All My Data
+                </button>
+                {resetError && (
+                  <p className="text-red-400 mt-4">{resetError}</p>
+                )}
+                {showResetConfirm && (
+                  <div className="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center z-50 p-4">
+                    <div className="bg-gray-800 p-6 rounded-lg shadow-2xl border border-gray-700">
+                      <h3 className="text-xl font-bold text-white mb-4">
+                        Are you sure?
+                      </h3>
+                      <p className="text-gray-300 mb-6">
+                        This will delete ALL of your tasks and reset your
+                        stats. This cannot be undone.
+                      </p>
+                      <div className="flex justify-end space-x-4">
+                        <button
+                          onClick={() => setShowResetConfirm(false)}
+                          className="px-4 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700"
+                        >
+                          Cancel
+                        </button>
+                        <button
+                          onClick={handleResetData}
+                          className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700"
+                        >
+                          Yes, Reset All My Data
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
 
-          {/* Task Lists */}
-          <div>
-            {/* Active Tasks */}
-            <div className="mb-8">
-              <h2 className="text-2xl font-semibold mb-4 text-yellow-400">
-                Active Tasks (
-                {categorizedTasks.activeToday.length})
+          {/* --- Right Column: Task Lists & Charts --- */}
+          <div className="lg:col-span-2 flex flex-col gap-6">
+            {/* --- Task Lists --- */}
+            <div className="bg-gray-800 p-6 rounded-lg shadow-xl">
+              <h2 className="text-2xl font-semibold text-white mb-4">
+                Your Tasks for Today ({new Date().toLocaleDateString()})
               </h2>
-              {categorizedTasks.activeToday.length > 0 ? (
-                <ul className="space-y-3">
-                  {categorizedTasks.activeToday
-                    .sort(
-                      (a, b) =>
-                        a.startTime.toDate().getTime() -
-                        b.startTime.toDate().getTime()
-                    )
-                    .map(renderTask)}
-                </ul>
-              ) : (
-                <p className="text-gray-400">
-                  No tasks are active. Get ready for the next one!
-                </p>
-              )}
+
+              {/* Active Tasks */}
+              <TaskSection
+                title="Active"
+                tasks={active}
+                runningTimers={runningTimers}
+                onStart={startTaskTimer}
+                onStop={stopTaskTimer}
+                onComplete={handleCompleteTask}
+                formatStopwatch={formatStopwatch}
+                accentColor="red"
+              />
+
+              {/* Upcoming Tasks */}
+              <TaskSection
+                title="Upcoming"
+                tasks={upcoming}
+                accentColor="yellow"
+              />
+
+              {/* Today's Completed Tasks */}
+              <TaskSection
+                title="Completed Today"
+                tasks={todayCompleted}
+                accentColor="green"
+              />
             </div>
 
-            {/* Upcoming Tasks */}
-            <div className="mb-8">
-              <h2 className="text-2xl font-semibold mb-4 text-blue-400">
-                Upcoming Tasks (
-                {categorizedTasks.upcomingToday.length})
-              </h2>
-              {categorizedTasks.upcomingToday.length > 0 ? (
-                <ul className="space-y-3">
-                  {categorizedTasks.upcomingToday
-                    .sort(
-                      (a, b) =>
-                        a.startTime.toDate().getTime() -
-                        b.startTime.toDate().getTime()
-                    )
-                    .map((task) => (
-                      <li
-                        key={task.id}
-                        className="p-4 bg-gray-800 rounded-lg shadow-sm flex justify-between items-center"
-                      >
-                        <div>
-                          <span className="font-semibold text-lg">
-                            {task.title}
-                          </span>
-                          <p className="text-sm text-gray-400">
-                            Starts:{' '}
-                            {new Date(
-                              task.startTime.toDate()
-                            ).toLocaleTimeString()}{' '}
-                            | Est: {task.estimatedHours}h
-                          </p>
-                        </div>
-                      </li>
-                    ))}
-                </ul>
-              ) : (
-                <p className="text-gray-400">
-                  No more tasks scheduled for today.
-                </p>
-              )}
-            </div>
+            {/* --- Charts --- */}
+            <div className="bg-gray-800 p-6 rounded-lg shadow-xl">
+              <div className="flex flex-col md:flex-row justify-between items-center mb-4">
+                <h2 className="text-2xl font-semibold text-white mb-4 md:mb-0">
+                  Productivity Comparison
+                </h2>
+                <select
+                  value={filterType}
+                  onChange={(e) => setFilterType(e.target.value)}
+                  className="bg-gray-700 border border-gray-600 text-white rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                >
+                  <option value="today">Today</option>
+                  <option value="week">This Week</option>
+                  <option value="month">This Month</option>
+                  <option value="all">All Time</option>
+                </select>
+              </div>
 
-            {/* Completed Tasks */}
-            <div className="mb-8">
-              <h2 className="text-2xl font-semibold mb-4 text-green-400">
-                Completed Tasks (
-                {categorizedTasks.completedToday.length})
-              </h2>
-              {categorizedTasks.completedToday.length > 0 ? (
-                <ul className="space-y-3">
-                  {categorizedTasks.completedToday
-                    .sort(
-                      (a, b) =>
-                        a.startTime.toDate().getTime() -
-                        b.startTime.toDate().getTime()
-                    )
-                    .map((task) => (
-                      <li
-                        key={task.id}
-                        className="p-4 bg-gray-800 rounded-lg shadow-sm opacity-60"
-                      >
-                        <span className="font-semibold text-lg line-through">
-                          {task.title}
-                        </span>
-                        <p className="text-sm text-gray-500">
-                          Time Spent:{' '}
-                          {formatStopwatch(task.timeElapsed || 0)}
-                        </p>
-                      </li>
-                    ))}
-                </ul>
-              ) : (
-                <p className="text-gray-400">No tasks completed yet today.</p>
-              )}
+              {/* Charts Container */}
+              <div className="space-y-8 mt-8">
+                <ChartComponent
+                  title="Tasks Completed"
+                  data={filteredStats}
+                  dataKey="tasksCompleted"
+                  fill="#8884d8"
+                />
+                <ChartComponent
+                  title="Total Hours"
+                  data={filteredStats}
+                  dataKey="totalHours"
+                  fill="#82ca9d"
+                />
+                <ChartComponent
+                  title="Total Pushups"
+                  data={filteredStats}
+                  dataKey="pushupsCompleted"
+                  fill="#ffc658"
+                />
+              </div>
             </div>
           </div>
-        </div>
-
-        {/* Right Column: Charts */}
-        <div className="bg-gray-800 p-6 rounded-lg shadow-lg">
-          <h2 className="text-3xl font-bold mb-6 text-white">
-            Productivity Comparison
-          </h2>
-          {renderFilterButtons()}
-          {renderChart(
-            filteredChartData.taskData,
-            'Tasks',
-            '#3b82f6'
-          )}{' '}
-          {/* blue */}
-          {renderChart(
-            filteredChartData.hourData,
-            'Hours',
-            '#10b981'
-          )}{' '}
-          {/* green */}
-          {renderChart(
-            filteredChartData.pushupData,
-            'Pushups',
-            '#ef4444'
-          )}{' '}
-          {/* red */}
         </div>
       </div>
     </div>
   );
 }
 
-export default App;
+// --- Sub-Component: TaskSection ---
+function TaskSection({
+  title,
+  tasks,
+  accentColor,
+  runningTimers,
+  onStart,
+  onStop,
+  onComplete,
+  formatStopwatch,
+}) {
+  const colors = {
+    red: 'border-red-500',
+    yellow: 'border-yellow-500',
+    green: 'border-green-500',
+  };
+  const accentClass = colors[accentColor] || 'border-gray-500';
+
+  return (
+    <div className="mb-6">
+      <h3
+        className={`text-xl font-semibold text-white mb-3 pb-2 ${accentClass} border-b-2`}
+      >
+        {title} ({tasks.length})
+      </h3>
+      {tasks.length === 0 ? (
+        <p className="text-gray-400 italic">No tasks in this category.</p>
+      ) : (
+        <ul className="space-y-3">
+          {tasks.map((task) => {
+            const timer = runningTimers[task.id];
+            const elapsed = timer
+              ? timer.elapsedSeconds
+              : task.elapsedSeconds || 0;
+            const isRunning = !!timer;
+
+            return (
+              <li
+                key={task.id}
+                className="flex flex-col md:flex-row items-start md:items-center justify-between p-4 bg-gray-700 rounded-lg shadow"
+              >
+                <div className="flex-1 mb-3 md:mb-0">
+                  <span className="text-lg font-medium text-gray-100">
+                    {task.title}
+                  </span>
+                  <span className="block text-sm text-gray-400">
+                    {task.completed
+                      ? `Completed at: ${task.completedAt
+                          ?.toDate()
+                          .toLocaleTimeString()}`
+                      : `Starts at: ${task.startTime
+                          ?.toDate()
+                          .toLocaleTimeString()}`}{' '}
+                    | {task.estimatedHours}hr
+                  </span>
+                </div>
+                <div className="flex items-center space-x-3 w-full md:w-auto">
+                  {title === 'Active' && (
+                    <>
+                      <div className="flex flex-col items-center">
+                        <span className="text-lg font-mono text-blue-300">
+                          {formatStopwatch(elapsed)}
+                        </span>
+                        <span className="text-xs text-gray-400">
+                          Time Elapsed
+                        </span>
+                      </div>
+                      {!isRunning ? (
+                        <button
+                          onClick={() => onStart(task.id)}
+                          className="px-3 py-1 bg-green-600 text-white text-sm font-semibold rounded-md hover:bg-green-700"
+                        >
+                          Start
+                        </button>
+                      ) : (
+                        <button
+                          onClick={() => onStop(task.id)}
+                          className="px-3 py-1 bg-yellow-600 text-white text-sm font-semibold rounded-md hover:bg-yellow-700"
+                        >
+                          Stop
+                        </button>
+                      )}
+                      <button
+                        onClick={() => onComplete(task.id)}
+                        className="px-3 py-1 bg-blue-600 text-white text-sm font-semibold rounded-md hover:bg-blue-700"
+                      >
+                        Complete
+                      </button>
+                    </>
+                  )}
+                  {title === 'Completed Today' && (
+                    <span className="text-lg font-semibold text-green-400">
+                      Done!
+                    </span>
+                  )}
+                </div>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+// --- Sub-Component: ChartComponent ---
+function ChartComponent({ title, data, dataKey, fill }) {
+  if (data.length === 0) {
+    return (
+       <div>
+        <h4 className="text-lg font-semibold text-white mb-2">{title}</h4>
+        <p className="text-gray-400 italic">No data for this period.</p>
+       </div>
+    )
+  }
+  return (
+    <div>
+      <h4 className="text-lg font-semibold text-white mb-2">{title}</h4>
+      <div style={{ width: '100%', height: 300 }}>
+        <ResponsiveContainer>
+          <BarChart
+            data={data}
+            margin={{
+              top: 5,
+              right: 20,
+              left: -10,
+              bottom: 5,
+            }}
+          >
+            <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
+            <XAxis dataKey="displayName" stroke="#9CA3AF" />
+            <YAxis stroke="#9CA3AF" />
+            <Tooltip
+              contentStyle={{ backgroundColor: '#1F2937', border: 'none' }}
+              labelStyle={{ color: '#F9FAFB' }}
+            />
+            <Legend wrapperStyle={{ color: '#F9FAFB' }} />
+            <Bar dataKey={dataKey} fill={fill} />
+          </BarChart>
+        </ResponsiveContainer>
+      </div>
+    </div>
+  );
+}
