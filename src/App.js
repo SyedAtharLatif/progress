@@ -445,6 +445,13 @@ export default function App() {
   }, [tasks, currentTime]);
 
   const filteredChartData = useMemo(() => {
+    // --- FIX: Add this check ---
+    // If there is no user, return empty data to prevent crash
+    if (!user) {
+      return { taskData: [], hourData: [], pushupData: [] };
+    }
+    // --- End of Fix ---
+
     const now = new Date();
     const today = now.setHours(0, 0, 0, 0);
     const startOfWeek = new Date(today).setDate(now.getDate() - now.getDay());
