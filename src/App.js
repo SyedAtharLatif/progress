@@ -541,37 +541,46 @@ export default function App() {
 
   // --- Admin Functions ---
   const handleResetData = async () => {
-    if (!user) return;
+    if (!user || user.email !== 'atharlatif200@gmail.com') return;
     setResetError(null);
 
     try {
       const batch = writeBatch(db);
 
-      // 1. Delete all tasks in the user's private collection
-      const tasksQuery = query(collection(db, getTasksCollectionPath(user.uid)));
-      const tasksSnapshot = await getDocs(tasksQuery);
-      tasksSnapshot.forEach((doc) => {
-        batch.delete(doc.ref);
-      });
+      // 1. Get all user stat documents
+      const statsQuery = query(collection(db, getAllPublicStatsCollectionPath()));
+      const statsSnapshot = await getDocs(statsQuery);
 
-      // 2. Reset the user's public stats document
-      const statsRef = doc(db, getPublicStatsDocPath(user.uid));
-      batch.update(statsRef, {
-        tasksCompleted: 0,
-        totalHours: 0,
-        pushupsCompleted: 0,
-        lastReset: Timestamp.now(),
-      });
+      // 2. Loop through each user to delete their private tasks and reset their public stats
+      for (const userStatDoc of statsSnapshot.docs) {
+        const userId = userStatDoc.id;
+        
+        // A. Reset the user's public stats document
+        batch.update(userStatDoc.ref, {
+          tasksCompleted: 0,
+          totalHours: 0,
+          pushupsCompleted: 0,
+          lastReset: Timestamp.now(),
+        });
 
-      // Commit the batch
+        // B. Delete all tasks in the user's private collection
+        const tasksQuery = query(collection(db, getTasksCollectionPath(userId)));
+        const tasksSnapshot = await getDocs(tasksQuery);
+        tasksSnapshot.forEach((taskDoc) => {
+          batch.delete(taskDoc.ref);
+        });
+      }
+
+      // 3. Commit the giant batch
       await batch.commit();
 
       // Reset local state
       setDailyPushups(5);
       setRunningTimers({});
       setShowResetConfirm(false);
+
     } catch (err) {
-      console.error('Error resetting data:', err);
+      console.error('Error resetting all data:', err);
       // Check for the specific permissions error
       if (err.code === 'permission-denied' || err.code === 'failed-precondition') {
         setResetError('Failed to reset data. Error: Missing or insufficient permissions. Please update your Firestore security rules.');
@@ -766,7 +775,7 @@ export default function App() {
                   onClick={() => setShowResetConfirm(true)}
                   className="w-full px-4 py-2 bg-red-700 text-white font-semibold rounded-lg shadow-lg hover:bg-red-800 transition-colors"
                 >
-                  Reset All My Data
+                  Reset ALL User Data
                 </button>
                 {resetError && (
                   <p className="text-red-400 mt-4">{resetError}</p>
@@ -778,8 +787,8 @@ export default function App() {
                         Are you sure?
                       </h3>
                       <p className="text-gray-300 mb-6">
-                        This will delete ALL of your tasks and reset your
-                        stats. This cannot be undone.
+                        This will delete ALL tasks and reset ALL stats for
+                        EVERY user. This cannot be undone.
                       </p>
                       <div className="flex justify-end space-x-4">
                         <button
@@ -792,7 +801,7 @@ export default function App() {
                           onClick={handleResetData}
                           className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700"
                         >
-                          Yes, Reset All My Data
+                          Yes, Reset ALL Data
                         </button>
                       </div>
                     </div>
